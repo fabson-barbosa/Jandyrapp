@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Iterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -107,10 +107,7 @@ class IngredienteBase(BaseModel):
     unidade_medida: str
     preco_medio: Decimal = Field(..., ge=Decimal("0"), max_digits=10, decimal_places=2)
 
-    class Config:
-        orm_mode = True
-        use_enum_values = True
-        json_encoders = {Decimal: lambda v: float(v)}
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True, json_encoders={Decimal: lambda v: float(v)})
 
 
 class IngredienteCreate(IngredienteBase):
@@ -126,20 +123,16 @@ class PratoIngredienteCreate(BaseModel):
     quantidade: Decimal = Field(..., ge=Decimal("0"), max_digits=10, decimal_places=2)
     unidade_medida: str
 
-    class Config:
-        orm_mode = True
-        json_encoders = {Decimal: lambda v: float(v)}
+    model_config = ConfigDict(from_attributes=True, json_encoders={Decimal: lambda v: float(v)})
 
 
 class PratoIngredienteRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, json_encoders={Decimal: lambda v: float(v)})
+
     id_prato_ingrediente: int
     quantidade: Decimal = Field(..., ge=Decimal("0"), max_digits=10, decimal_places=2)
     unidade_medida: str
     ingrediente: IngredienteRead
-
-    class Config:
-        orm_mode = True
-        json_encoders = {Decimal: lambda v: float(v)}
 
 
 class CardapioEntrada(BaseModel):
@@ -148,13 +141,12 @@ class CardapioEntrada(BaseModel):
 
 
 class CardapioRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_cardapio_semanal: int
     dia_da_semana: str
     tipo_refeicao: str
     refeicao: "RefeicaoResumo"
-
-    class Config:
-        orm_mode = True
 
 
 class RefeicaoCreate(BaseModel):
@@ -165,21 +157,23 @@ class RefeicaoCreate(BaseModel):
 
 
 class RefeicaoResumo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id_refeicao: int
     nome_prato: str
     descricao: Optional[str]
 
-    class Config:
-        orm_mode = True
-
 
 class RefeicaoRead(RefeicaoResumo):
     ingredientes: List[PratoIngredienteRead]
-    cardapio: List[CardapioRead]
+    cardapios: List[CardapioRead]
+
+    model_config = ConfigDict(from_attributes=True)
 
 
-CardapioRead.update_forward_refs()
-RefeicaoRead.update_forward_refs()
+# Resolver referências tardias após definir classes
+CardapioRead.model_rebuild()
+RefeicaoRead.model_rebuild()
 
 
 @app.get("/", tags=["Meta"])
@@ -260,57 +254,67 @@ async def listar_refeicoes(db: Session = Depends(get_db)) -> List[BdRefeicao]:
 
 @app.post("/refeicoes", response_model=RefeicaoRead, status_code=status.HTTP_201_CREATED)
 async def criar_refeicao(payload: RefeicaoCreate, db: Session = Depends(get_db)) -> BdRefeicao:
-    pratos = db.execute(select(BdRefeicao).filter_by(nome_prato=payload.nome_prato)).scalars().first()
-    if pratos:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refeição já cadastrada")
+    try:
+        pratos = db.execute(select(BdRefeicao).filter_by(nome_prato=payload.nome_prato)).scalars().first()
+        if pratos:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Refeição já cadastrada")
 
-    if not payload.ingredientes:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe ao menos um ingrediente")
+        if not payload.ingredientes:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe ao menos um ingrediente")
 
-    refeicao = BdRefeicao(nome_prato=payload.nome_prato, descricao=payload.descricao)
-    db.add(refeicao)
-    db.flush()
+        refeicao = BdRefeicao(nome_prato=payload.nome_prato, descricao=payload.descricao)
+        db.add(refeicao)
+        db.flush()
 
-    for item in payload.ingredientes:
-        ingrediente = db.get(BdIngrediente, item.id_ingrediente)
-        if not ingrediente:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Ingrediente id {item.id_ingrediente} não encontrado",
-            )
-        prato_ingrediente = BdPratoIngrediente(
-            refeicao=refeicao,
-            ingrediente=ingrediente,
-            quantidade=Decimal(str(item.quantidade)),
-            unidade_medida=item.unidade_medida,
-        )
-        db.add(prato_ingrediente)
-
-    if payload.cardapio:
-        for dia in payload.cardapio:
-            registro = BdCardapioSemanal(
+        for item in payload.ingredientes:
+            ingrediente = db.get(BdIngrediente, item.id_ingrediente)
+            if not ingrediente:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Ingrediente id {item.id_ingrediente} não encontrado",
+                )
+            prato_ingrediente = BdPratoIngrediente(
                 refeicao=refeicao,
-                dia_da_semana=dia.dia_da_semana,
-                tipo_refeicao=dia.tipo_refeicao,
+                ingrediente=ingrediente,
+                quantidade=Decimal(str(item.quantidade)),
+                unidade_medida=item.unidade_medida,
             )
-            db.add(registro)
+            db.add(prato_ingrediente)
 
-    db.commit()
+        if payload.cardapio:
+            for dia in payload.cardapio:
+                registro = BdCardapioSemanal(
+                    refeicao=refeicao,
+                    dia_da_semana=dia.dia_da_semana,
+                    tipo_refeicao=dia.tipo_refeicao,
+                )
+                db.add(registro)
 
-    refeicao_completa = (
-        db.execute(
-            select(BdRefeicao)
-            .options(
-                selectinload(BdRefeicao.ingredientes).selectinload(BdPratoIngrediente.ingrediente),
-                selectinload(BdRefeicao.cardapios),
+        db.commit()
+
+        refeicao_completa = (
+            db.execute(
+                select(BdRefeicao)
+                .options(
+                    selectinload(BdRefeicao.ingredientes).selectinload(BdPratoIngrediente.ingrediente),
+                    selectinload(BdRefeicao.cardapios),
+                )
+                .filter(BdRefeicao.id_refeicao == refeicao.id_refeicao)
             )
-            .filter(BdRefeicao.id_refeicao == refeicao.id_refeicao)
+            .scalars()
+            .first()
         )
-        .scalars()
-        .first()
-    )
 
-    return refeicao_completa
+        if refeicao_completa is None:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Falha ao carregar refeição criada.")
+
+        return refeicao_completa
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:  # pragma: no cover - log fallback
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @app.get("/cardapio", response_model=List[CardapioRead])
