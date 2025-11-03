@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import CheckConstraint, Enum as SqlEnum, ForeignKey, Integer, Numeric, String, create_engine
+from sqlalchemy import CheckConstraint, Enum as SqlEnum, ForeignKey, Integer, Numeric, String, create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -254,6 +254,43 @@ def _hash_texto(valor: str) -> str:
     return hashlib.sha256(valor.encode("utf-8")).hexdigest()
 
 
+def atualizar_esquema(engine) -> None:
+    insp = inspect(engine)
+    if "bd_alunos" not in insp.get_table_names():
+        return
+
+    colunas_info = insp.get_columns("bd_alunos")
+    colunas = {col["name"] for col in colunas_info}
+    adicionou_coluna = False
+
+    if "ra_hash" not in colunas:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("ALTER TABLE bd_alunos ADD COLUMN ra_hash VARCHAR(64)")
+        adicionou_coluna = True
+        colunas_info = insp.get_columns("bd_alunos")
+
+    info_ra_hash = next((col for col in colunas_info if col["name"] == "ra_hash"), None)
+    if info_ra_hash is None:
+        return
+
+    if adicionou_coluna or info_ra_hash.get("nullable", True):
+        with Session(engine) as session:
+            alunos_sem_hash = (
+                session.query(BdAluno)
+                .filter((BdAluno.ra_hash.is_(None)) | (BdAluno.ra_hash == ""))
+                .all()
+            )
+            for aluno in alunos_sem_hash:
+                if aluno.ra:
+                    aluno.ra_hash = _hash_texto(aluno.ra)
+            session.commit()
+
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bd_alunos_ra_hash ON bd_alunos (ra_hash)"
+        )
+
+
 def _obter_ou_criar_turma(session: Session, serie: str, periodo: str, nome_turma: str | None) -> BdTurma:
     consulta = session.query(BdTurma).filter(BdTurma.serie == serie, BdTurma.periodo == periodo)
     if nome_turma is None:
@@ -316,6 +353,7 @@ def criar_engine(echo: bool = False):
 
 def criar_tabelas(engine) -> None:
     Base.metadata.create_all(engine)
+    atualizar_esquema(engine)
 
 
 def preencher_dados_exemplo(engine) -> None:

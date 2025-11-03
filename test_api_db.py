@@ -8,7 +8,7 @@ from uuid import uuid4
 import requests
 from sqlalchemy.orm import Session
 
-from db_setup import BdAluno, BdCardapioSemanal, BdRefeicao, NovoAluno, cadastrar_aluno, criar_engine
+from db_setup import BdAluno, BdCardapioSemanal, BdRefeicao, NovoAluno, cadastrar_aluno, criar_engine, criar_tabelas
 
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
@@ -99,6 +99,7 @@ def testar_api() -> None:
 def testar_banco() -> None:
     print("\n== Testando acesso direto ao banco ==")
     engine = criar_engine()
+    criar_tabelas(engine)
 
     sufixo = uuid4().hex[:6]
     novo_aluno = NovoAluno(
